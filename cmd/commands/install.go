@@ -62,7 +62,6 @@ func installCmd(ctx context.Context, cmd *cli.Command) error {
 
 	args := cmd.Args()
 	if args.First() == "" {
-		// 如果没有参数，尝试从当前工作目录的 .tool-versions 文件读取并安装
 		manager := internal.NewSdkManager()
 		defer manager.Close()
 
@@ -288,7 +287,6 @@ func printSdk(sdks map[string]string, result map[string]bool) {
 	}
 }
 
-// installFromToolVersions 从指定的 .tool-versions 文件读取并安装 SDK
 func installFromToolVersions(manager *internal.Manager, toolVersionsPath string, autoConfirm bool) error {
 	tv, err := toolset.NewToolVersion(filepath.Dir(toolVersionsPath))
 	if err != nil {
@@ -299,24 +297,20 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 		return fmt.Errorf("no SDKs found in .tool-versions file")
 	}
 
-	// 收集需要安装的 SDK（包括插件和已存在的 SDK）
 	var missingPlugins []string
 	sdks := make(map[string]string)
 
 	for name, version := range tv.Record {
 		lookupSdk, err := manager.LookupSdk(name)
 		if err != nil {
-			// 如果找不到 SDK，说明插件未安装
 			missingPlugins = append(missingPlugins, name)
 		} else {
-			// 检查版本是否已安装
 			if !lookupSdk.CheckExists(base.Version(version)) {
 				sdks[name] = version
 			}
 		}
 	}
 
-	// 如果有未安装的插件，提示用户先安装插件
 	if len(missingPlugins) > 0 {
 		fmt.Printf("The following plugins are not installed:\n")
 		for _, plugin := range missingPlugins {
@@ -326,7 +320,7 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 		for _, plugin := range missingPlugins {
 			fmt.Printf("  vfox add %s\n", plugin)
 		}
-		return cli.Exit("", 1)
+		return cli.Exit("plugins must be installed first", 1)
 	}
 
 	if len(sdks) == 0 {
@@ -367,7 +361,6 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 		WithWriter(stdout).
 		Start()
 
-	// 安装 SDK
 	for sdk, version := range sdks {
 		index++
 		spinnerInfo.UpdateText(fmt.Sprintf("[%v/%v] %s: %s@%s installing...\033[K", index, count, "SDK", sdk, version))
