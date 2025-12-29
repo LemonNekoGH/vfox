@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pterm/pterm"
@@ -61,6 +62,15 @@ func installCmd(ctx context.Context, cmd *cli.Command) error {
 
 	args := cmd.Args()
 	if args.First() == "" {
+		// 如果没有参数，尝试从当前工作目录的 .tool-versions 文件读取并安装
+		manager := internal.NewSdkManager()
+		defer manager.Close()
+
+		toolVersionsPath := filepath.Join(manager.PathMeta.WorkingDirectory, ".tool-versions")
+		if util.FileExists(toolVersionsPath) {
+			return installFromToolVersions(manager, toolVersionsPath, yes)
+		}
+
 		return cli.Exit("sdk name is required", 1)
 	}
 
@@ -276,4 +286,135 @@ func printSdk(sdks map[string]string, result map[string]bool) {
 
 		fmt.Printf("  %s\n", sdkVersion)
 	}
+}
+
+// installFromToolVersions 从指定的 .tool-versions 文件读取并安装 SDK
+func installFromToolVersions(manager *internal.Manager, toolVersionsPath string, autoConfirm bool) error {
+	tv, err := toolset.NewToolVersion(filepath.Dir(toolVersionsPath))
+	if err != nil {
+		return fmt.Errorf("failed to read .tool-versions file: %w", err)
+	}
+
+	if len(tv.Record) == 0 {
+		return fmt.Errorf("no SDKs found in .tool-versions file")
+	}
+
+	// 收集需要安装的 SDK（包括插件和已存在的 SDK）
+	var plugins []string
+	sdks := make(map[string]string)
+
+	for name, version := range tv.Record {
+		lookupSdk, err := manager.LookupSdk(name)
+		if err != nil {
+			// 如果找不到 SDK，可能是插件
+			plugins = append(plugins, name)
+		} else {
+			// 检查版本是否已安装
+			if !lookupSdk.CheckExists(base.Version(version)) {
+				sdks[name] = version
+			}
+		}
+	}
+
+	if len(plugins) == 0 && len(sdks) == 0 {
+		fmt.Println("All SDKs in .tool-versions are already installed")
+		return nil
+	}
+
+	fmt.Println("Install the following plugins and SDKs from .tool-versions:")
+	printPlugin(plugins, nil)
+	printSdk(sdks, nil)
+
+	if !autoConfirm {
+		if util.IsNonInteractiveTerminal() {
+			return cli.Exit("Use the -y flag to automatically confirm installation in non-interactive environments", 1)
+		}
+		result, _ := pterm.DefaultInteractiveConfirm.
+			WithDefaultValue(true).
+			Show("Do you want to install these plugins and SDKs?")
+		if !result {
+			return nil
+		}
+	}
+
+	var (
+		count         = len(plugins) + len(sdks)
+		index         = 0
+		errorStr      string
+		stdout        = os.Stdout
+		stderr        = os.Stderr
+		pluginsResult = make(map[string]bool)
+		sdksResult    = make(map[string]bool)
+	)
+	os.Stdout = nil
+	os.Stderr = nil
+	pterm.SetDefaultOutput(os.Stdout)
+
+	spinnerInfo, _ := pterm.DefaultSpinner.
+		WithSequence([]string{"⣾ ", "⣽ ", "⣻ ", "⢿ ", "⡿ ", "⣟ ", "⣯ ", "⣷ "}...).
+		WithText("Installing...").
+		WithWriter(stdout).
+		Start()
+
+	// 安装插件
+	for _, plugin := range plugins {
+		index++
+		spinnerInfo.UpdateText(fmt.Sprintf("[%v/%v] %s: %s installing...\033[K", index, count, "Plugin", plugin))
+		pluginsResult[plugin] = false
+		if err := manager.Add(plugin, "", ""); err != nil {
+			if errors.Is(err, internal.ManifestNotFound) {
+				errorStr = fmt.Sprintf("%s\n[%s] not found in remote registry, please check the name", errorStr, plugin)
+			} else {
+				errorStr = fmt.Sprintf("%s\n%s", errorStr, err)
+			}
+			continue
+		}
+		pluginsResult[plugin] = true
+
+		// 插件安装成功后，检查是否需要安装对应的 SDK 版本
+		if version, ok := tv.Record[plugin]; ok {
+			lookupSdk, err := manager.LookupSdk(plugin)
+			if err == nil && !lookupSdk.CheckExists(base.Version(version)) {
+				// 如果 SDK 版本还没有安装，添加到安装列表（如果还没有添加）
+				if _, exists := sdks[plugin]; !exists {
+					sdks[plugin] = version
+					count++
+				}
+			}
+		}
+	}
+
+	// 安装 SDK
+	for sdk, version := range sdks {
+		index++
+		spinnerInfo.UpdateText(fmt.Sprintf("[%v/%v] %s: %s@%s installing...\033[K", index, count, "SDK", sdk, version))
+		sdkVersion := fmt.Sprintf("%s@%s", sdk, version)
+		sdksResult[sdkVersion] = false
+		lookupSdk, err := manager.LookupSdk(sdk)
+		if err != nil {
+			errorStr = fmt.Sprintf("%s\n%s", errorStr, err)
+			continue
+		}
+		err = lookupSdk.Install(base.Version(version))
+		if err != nil {
+			errorStr = fmt.Sprintf("%s\n%s", errorStr, err)
+			continue
+		}
+		sdksResult[sdkVersion] = true
+	}
+
+	spinnerInfo.UpdateText(fmt.Sprintf("[%v/%v] Installation completed.\033[K", count, count))
+	_ = spinnerInfo.Stop()
+	os.Stdout = stdout
+	os.Stderr = stderr
+	pterm.SetDefaultOutput(os.Stdout)
+
+	fmt.Printf("%s indicates successful installation, while %s indicates installation failure.\n", pterm.Green("Green"), pterm.Red("red"))
+	printPlugin(plugins, pluginsResult)
+	printSdk(sdks, sdksResult)
+
+	if len(errorStr) > 0 {
+		fmt.Println(errorStr)
+	}
+	return nil
 }
