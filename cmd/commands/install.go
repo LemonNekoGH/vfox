@@ -300,14 +300,14 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 	}
 
 	// 收集需要安装的 SDK（包括插件和已存在的 SDK）
-	var plugins []string
+	var missingPlugins []string
 	sdks := make(map[string]string)
 
 	for name, version := range tv.Record {
 		lookupSdk, err := manager.LookupSdk(name)
 		if err != nil {
-			// 如果找不到 SDK，可能是插件
-			plugins = append(plugins, name)
+			// 如果找不到 SDK，说明插件未安装
+			missingPlugins = append(missingPlugins, name)
 		} else {
 			// 检查版本是否已安装
 			if !lookupSdk.CheckExists(base.Version(version)) {
@@ -316,13 +316,25 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 		}
 	}
 
-	if len(plugins) == 0 && len(sdks) == 0 {
+	// 如果有未安装的插件，提示用户先安装插件
+	if len(missingPlugins) > 0 {
+		fmt.Printf("The following plugins are not installed:\n")
+		for _, plugin := range missingPlugins {
+			fmt.Printf("  %s\n", plugin)
+		}
+		fmt.Printf("\nPlease install these plugins first using:\n")
+		for _, plugin := range missingPlugins {
+			fmt.Printf("  vfox add %s\n", plugin)
+		}
+		return cli.Exit("", 1)
+	}
+
+	if len(sdks) == 0 {
 		fmt.Println("All SDKs in .tool-versions are already installed")
 		return nil
 	}
 
-	fmt.Println("Install the following plugins and SDKs from .tool-versions:")
-	printPlugin(plugins, nil)
+	fmt.Println("Install the following SDKs from .tool-versions:")
 	printSdk(sdks, nil)
 
 	if !autoConfirm {
@@ -331,20 +343,19 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 		}
 		result, _ := pterm.DefaultInteractiveConfirm.
 			WithDefaultValue(true).
-			Show("Do you want to install these plugins and SDKs?")
+			Show("Do you want to install these SDKs?")
 		if !result {
 			return nil
 		}
 	}
 
 	var (
-		count         = len(plugins) + len(sdks)
-		index         = 0
-		errorStr      string
-		stdout        = os.Stdout
-		stderr        = os.Stderr
-		pluginsResult = make(map[string]bool)
-		sdksResult    = make(map[string]bool)
+		count      = len(sdks)
+		index      = 0
+		errorStr   string
+		stdout     = os.Stdout
+		stderr     = os.Stderr
+		sdksResult = make(map[string]bool)
 	)
 	os.Stdout = nil
 	os.Stderr = nil
@@ -355,34 +366,6 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 		WithText("Installing...").
 		WithWriter(stdout).
 		Start()
-
-	// 安装插件
-	for _, plugin := range plugins {
-		index++
-		spinnerInfo.UpdateText(fmt.Sprintf("[%v/%v] %s: %s installing...\033[K", index, count, "Plugin", plugin))
-		pluginsResult[plugin] = false
-		if err := manager.Add(plugin, "", ""); err != nil {
-			if errors.Is(err, internal.ManifestNotFound) {
-				errorStr = fmt.Sprintf("%s\n[%s] not found in remote registry, please check the name", errorStr, plugin)
-			} else {
-				errorStr = fmt.Sprintf("%s\n%s", errorStr, err)
-			}
-			continue
-		}
-		pluginsResult[plugin] = true
-
-		// 插件安装成功后，检查是否需要安装对应的 SDK 版本
-		if version, ok := tv.Record[plugin]; ok {
-			lookupSdk, err := manager.LookupSdk(plugin)
-			if err == nil && !lookupSdk.CheckExists(base.Version(version)) {
-				// 如果 SDK 版本还没有安装，添加到安装列表（如果还没有添加）
-				if _, exists := sdks[plugin]; !exists {
-					sdks[plugin] = version
-					count++
-				}
-			}
-		}
-	}
 
 	// 安装 SDK
 	for sdk, version := range sdks {
@@ -410,7 +393,6 @@ func installFromToolVersions(manager *internal.Manager, toolVersionsPath string,
 	pterm.SetDefaultOutput(os.Stdout)
 
 	fmt.Printf("%s indicates successful installation, while %s indicates installation failure.\n", pterm.Green("Green"), pterm.Red("red"))
-	printPlugin(plugins, pluginsResult)
 	printSdk(sdks, sdksResult)
 
 	if len(errorStr) > 0 {
