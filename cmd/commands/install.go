@@ -67,7 +67,7 @@ func installCmd(ctx context.Context, cmd *cli.Command) error {
 
 		toolVersionsPath := filepath.Join(manager.PathMeta.WorkingDirectory, ".tool-versions")
 		if util.FileExists(toolVersionsPath) {
-			return installFromToolVersions(manager, toolVersionsPath, yes)
+			return installFromWorkingDirectory(manager, yes)
 		}
 
 		return cli.Exit("sdk name is required", 1)
@@ -145,6 +145,112 @@ func installAll(autoConfirm bool) error {
 	if err != nil {
 		return err
 	}
+
+	return installAllFromList(manager, plugins, sdks, autoConfirm)
+}
+
+func notInstalled(manager *internal.Manager) (plugins []string, sdks map[string]string, err error) {
+	tvs, err := toolset.NewMultiToolVersions([]string{
+		manager.PathMeta.WorkingDirectory,
+		manager.PathMeta.CurTmpPath,
+		manager.PathMeta.HomePath,
+	})
+	if err != nil {
+		return
+	}
+	sdks = tvs.FilterTools(func(name, version string) bool {
+		lookupSdk, err := manager.LookupSdk(name)
+		if err != nil {
+			plugins = append(plugins, name)
+			return true
+		}
+		if !lookupSdk.CheckExists(base.Version(version)) {
+			return true
+		}
+		return false
+	})
+	return
+}
+
+func printPlugin(plugins []string, result map[string]bool) {
+	if len(plugins) > 0 {
+		fmt.Println("Plugin:")
+		for _, plugin := range plugins {
+			if result != nil {
+				if result[plugin] {
+					plugin = pterm.Green(plugin)
+				} else {
+					plugin = pterm.Red(plugin)
+				}
+			}
+
+			fmt.Printf("  %s\n", plugin)
+		}
+	}
+}
+
+func printSdk(sdks map[string]string, result map[string]bool) {
+	fmt.Println("SDK:")
+	for sdk, version := range sdks {
+		sdkVersion := fmt.Sprintf("%s@%s", sdk, version)
+		if result != nil {
+			if result[sdkVersion] {
+				sdkVersion = pterm.Green(sdkVersion)
+			} else {
+				sdkVersion = pterm.Red(sdkVersion)
+			}
+		}
+
+		fmt.Printf("  %s\n", sdkVersion)
+	}
+}
+
+func installFromWorkingDirectory(manager *internal.Manager, autoConfirm bool) error {
+	plugins, sdks, err := notInstalledFromPath(manager, manager.PathMeta.WorkingDirectory)
+	if err != nil {
+		return err
+	}
+
+	if len(plugins) > 0 {
+		fmt.Printf("The following plugins are not installed:\n")
+		for _, plugin := range plugins {
+			fmt.Printf("  %s\n", plugin)
+		}
+		fmt.Printf("\nPlease install these plugins first using:\n")
+		for _, plugin := range plugins {
+			fmt.Printf("  vfox add %s\n", plugin)
+		}
+		return cli.Exit("plugins must be installed first", 1)
+	}
+
+	if len(sdks) == 0 {
+		fmt.Println("All SDKs in .tool-versions are already installed")
+		return nil
+	}
+
+	return installAllFromList(manager, plugins, sdks, autoConfirm)
+}
+
+func notInstalledFromPath(manager *internal.Manager, path string) (plugins []string, sdks map[string]string, err error) {
+	tvs, err := toolset.NewMultiToolVersions([]string{path})
+	if err != nil {
+		return
+	}
+	sdks = tvs.FilterTools(func(name, version string) bool {
+		lookupSdk, err := manager.LookupSdk(name)
+		if err != nil {
+			plugins = append(plugins, name)
+			return true
+		}
+		if !lookupSdk.CheckExists(base.Version(version)) {
+			return true
+		}
+		return false
+	})
+	return
+}
+
+func installAllFromList(manager *internal.Manager, plugins []string, sdks map[string]string, autoConfirm bool) error {
 	if len(plugins) == 0 && len(sdks) == 0 {
 		fmt.Println("All plugins and SDKs are already installed")
 		return nil
@@ -223,169 +329,6 @@ func installAll(autoConfirm bool) error {
 
 	fmt.Printf("%s indicates successful installation, while %s indicates installation failure.\n", pterm.Green("Green"), pterm.Red("red"))
 	printPlugin(plugins, pluginsResult)
-	printSdk(sdks, sdksResult)
-
-	if len(errorStr) > 0 {
-		fmt.Println(errorStr)
-	}
-	return nil
-}
-
-func notInstalled(manager *internal.Manager) (plugins []string, sdks map[string]string, err error) {
-	tvs, err := toolset.NewMultiToolVersions([]string{
-		manager.PathMeta.WorkingDirectory,
-		manager.PathMeta.CurTmpPath,
-		manager.PathMeta.HomePath,
-	})
-	if err != nil {
-		return
-	}
-	sdks = tvs.FilterTools(func(name, version string) bool {
-		lookupSdk, err := manager.LookupSdk(name)
-		if err != nil {
-			plugins = append(plugins, name)
-			return true
-		}
-		if !lookupSdk.CheckExists(base.Version(version)) {
-			return true
-		}
-		return false
-	})
-	return
-}
-
-func printPlugin(plugins []string, result map[string]bool) {
-	if len(plugins) > 0 {
-		fmt.Println("Plugin:")
-		for _, plugin := range plugins {
-			if result != nil {
-				if result[plugin] {
-					plugin = pterm.Green(plugin)
-				} else {
-					plugin = pterm.Red(plugin)
-				}
-			}
-
-			fmt.Printf("  %s\n", plugin)
-		}
-	}
-}
-
-func printSdk(sdks map[string]string, result map[string]bool) {
-	fmt.Println("SDK:")
-	for sdk, version := range sdks {
-		sdkVersion := fmt.Sprintf("%s@%s", sdk, version)
-		if result != nil {
-			if result[sdkVersion] {
-				sdkVersion = pterm.Green(sdkVersion)
-			} else {
-				sdkVersion = pterm.Red(sdkVersion)
-			}
-		}
-
-		fmt.Printf("  %s\n", sdkVersion)
-	}
-}
-
-func installFromToolVersions(manager *internal.Manager, toolVersionsPath string, autoConfirm bool) error {
-	tv, err := toolset.NewToolVersion(filepath.Dir(toolVersionsPath))
-	if err != nil {
-		return fmt.Errorf("failed to read .tool-versions file: %w", err)
-	}
-
-	if len(tv.Record) == 0 {
-		return fmt.Errorf("no SDKs found in .tool-versions file")
-	}
-
-	var missingPlugins []string
-	sdks := make(map[string]string)
-
-	for name, version := range tv.Record {
-		lookupSdk, err := manager.LookupSdk(name)
-		if err != nil {
-			missingPlugins = append(missingPlugins, name)
-		} else {
-			if !lookupSdk.CheckExists(base.Version(version)) {
-				sdks[name] = version
-			}
-		}
-	}
-
-	if len(missingPlugins) > 0 {
-		fmt.Printf("The following plugins are not installed:\n")
-		for _, plugin := range missingPlugins {
-			fmt.Printf("  %s\n", plugin)
-		}
-		fmt.Printf("\nPlease install these plugins first using:\n")
-		for _, plugin := range missingPlugins {
-			fmt.Printf("  vfox add %s\n", plugin)
-		}
-		return cli.Exit("plugins must be installed first", 1)
-	}
-
-	if len(sdks) == 0 {
-		fmt.Println("All SDKs in .tool-versions are already installed")
-		return nil
-	}
-
-	fmt.Println("Install the following SDKs from .tool-versions:")
-	printSdk(sdks, nil)
-
-	if !autoConfirm {
-		if util.IsNonInteractiveTerminal() {
-			return cli.Exit("Use the -y flag to automatically confirm installation in non-interactive environments", 1)
-		}
-		result, _ := pterm.DefaultInteractiveConfirm.
-			WithDefaultValue(true).
-			Show("Do you want to install these SDKs?")
-		if !result {
-			return nil
-		}
-	}
-
-	var (
-		count      = len(sdks)
-		index      = 0
-		errorStr   string
-		stdout     = os.Stdout
-		stderr     = os.Stderr
-		sdksResult = make(map[string]bool)
-	)
-	os.Stdout = nil
-	os.Stderr = nil
-	pterm.SetDefaultOutput(os.Stdout)
-
-	spinnerInfo, _ := pterm.DefaultSpinner.
-		WithSequence([]string{"⣾ ", "⣽ ", "⣻ ", "⢿ ", "⡿ ", "⣟ ", "⣯ ", "⣷ "}...).
-		WithText("Installing...").
-		WithWriter(stdout).
-		Start()
-
-	for sdk, version := range sdks {
-		index++
-		spinnerInfo.UpdateText(fmt.Sprintf("[%v/%v] %s: %s@%s installing...\033[K", index, count, "SDK", sdk, version))
-		sdkVersion := fmt.Sprintf("%s@%s", sdk, version)
-		sdksResult[sdkVersion] = false
-		lookupSdk, err := manager.LookupSdk(sdk)
-		if err != nil {
-			errorStr = fmt.Sprintf("%s\n%s", errorStr, err)
-			continue
-		}
-		err = lookupSdk.Install(base.Version(version))
-		if err != nil {
-			errorStr = fmt.Sprintf("%s\n%s", errorStr, err)
-			continue
-		}
-		sdksResult[sdkVersion] = true
-	}
-
-	spinnerInfo.UpdateText(fmt.Sprintf("[%v/%v] Installation completed.\033[K", count, count))
-	_ = spinnerInfo.Stop()
-	os.Stdout = stdout
-	os.Stderr = stderr
-	pterm.SetDefaultOutput(os.Stdout)
-
-	fmt.Printf("%s indicates successful installation, while %s indicates installation failure.\n", pterm.Green("Green"), pterm.Red("red"))
 	printSdk(sdks, sdksResult)
 
 	if len(errorStr) > 0 {
